@@ -79,6 +79,10 @@ object Main extends App {
             org.lichess.compression.game.Encoder.encode(g._2.toArray),
             Subtype.GenericBinarySubtype
           ), g._3)
+        } recover {
+          case e: java.lang.NullPointerException =>
+            println(s"Error #${g._1} ${g._3}")
+            throw e
         }
 
         def update(g: Encoded): Future[Unit] =
