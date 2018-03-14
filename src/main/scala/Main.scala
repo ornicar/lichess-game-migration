@@ -22,11 +22,13 @@ object Main extends App {
 
   override def main(args: Array[String]) {
 
-    val fromStr = args.lift(0).getOrElse("2010-01-01")
+    val fromStr = args.lift(0).getOrElse("2010-07-25")
+    val concurrency = args.lift(1).fold(4)(java.lang.Integer.parseInt)
+    val maxDocs = Int.MaxValue
 
-    val from = new DateTime(fromStr).withDayOfMonth(1).withTimeAtStartOfDay()
+    val from = new DateTime(fromStr).withTimeAtStartOfDay()
 
-    println(s"Migrate since $from")
+    println(s"Migrate since $from with concurrency $concurrency")
 
     implicit val system = ActorSystem()
     val decider: Supervision.Decider = {
@@ -59,7 +61,7 @@ object Main extends App {
           .find(query, projection)
           .sort(BSONDocument("ca" -> 1))
           .cursor[BSONDocument](readPreference = ReadPreference.secondaryPreferred)
-          .documentSource(maxDocs = Int.MaxValue)
+          .documentSource(maxDocs = maxDocs)
 
         def readDoc(doc: BSONDocument): Encoded = (
           doc.getAsTry[String]("_id").get,
@@ -70,19 +72,22 @@ object Main extends App {
         val tickSource =
           Source.tick(Reporter.freq, Reporter.freq, None)
 
-        def decodeOld(g: Encoded): Future[Decoded] = Future {
-          (g._1, chess.format.pgn.Binary.readMoves(g._2.byteArray.toList).get, g._3)
-        }
-
-        def encodeNew(g: Decoded): Future[Encoded] = Future {
-          (g._1, BSONBinary(
-            org.lichess.compression.game.Encoder.encode(g._2.toArray),
-            Subtype.GenericBinarySubtype
-          ), g._3)
-        } recover {
-          case e: java.lang.NullPointerException =>
-            println(s"Error #${g._1} ${g._3}")
-            throw e
+        def convert(g: Encoded): Future[Encoded] = Future {
+          g.copy(
+            _2 = try {
+              BSONBinary(
+                org.lichess.compression.game.Encoder.encode {
+                  chess.format.pgn.Binary.readMoves(g._2.byteArray.toList).get.toArray
+                },
+                Subtype.GenericBinarySubtype
+              )
+            }
+            catch {
+              case e: java.lang.NullPointerException =>
+                println(s"Error https://lichess.org/${g._1} ${g._3}")
+                throw e
+            }
+          )
         }
 
         def update(g: Encoded): Future[Unit] =
@@ -101,13 +106,13 @@ object Main extends App {
           ).map(_ => ())
 
         gameSource
-          .buffer(10000, OverflowStrategy.backpressure)
+          .buffer(20000 min maxDocs, OverflowStrategy.backpressure)
           .map(d => Some(readDoc(d)))
           .merge(tickSource, eagerComplete = true)
           .via(Reporter)
-          .mapAsyncUnordered(8)(decodeOld)
-          .mapAsyncUnordered(8)(encodeNew)
-          .mapAsyncUnordered(8)(update)
+          .mapAsyncUnordered(concurrency)(convert)
+          .buffer(300 min maxDocs, OverflowStrategy.backpressure)
+          .mapAsyncUnordered(concurrency * 3)(update)
           .runWith(Sink.ignore) andThen {
             case state =>
               close()

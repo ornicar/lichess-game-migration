@@ -23,6 +23,7 @@ object Reporter extends GraphStage[FlowShape[Option[Main.Encoded], Main.Encoded]
     private var counter = 0
     private var prev = 0
     private var date: Option[DateTime] = None
+    private var gameId: String = ""
 
     setHandler(in, new InHandler {
       override def onPush() = {
@@ -30,11 +31,12 @@ object Reporter extends GraphStage[FlowShape[Option[Main.Encoded], Main.Encoded]
           case Some(g) => {
             counter += 1
             date = Some(g._3)
+            gameId = g._1
             push(out, g)
           }
           case None => {
             val gps = (counter - prev) / freq.toSeconds
-            println(s"${date.fold("-")(formatter.print)} $counter $gps/s")
+            println(s"${date.fold("-")(formatter.print)} https://lichess.org/$gameId $counter $gps/s")
             prev = counter
             pull(in)
           }
